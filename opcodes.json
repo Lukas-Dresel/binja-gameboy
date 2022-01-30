@@ -3552,7 +3552,7 @@
       ],
       "addr": "0xe8",
       "operand1": "SP",
-      "operand2": "r8"
+      "operand2": "d8"
     },
     "0xe9": {
       "mnemonic": "JP",
