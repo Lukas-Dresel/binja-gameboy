@@ -2,6 +2,9 @@ import json
 import os
 import re
 import struct
+from typing import List
+from .instruction import GameBoyInstruction
+from .lifter import GameBoyLifter
 
 from binaryninja.architecture import Architecture
 from binaryninja.enums import InstructionTextTokenType, FlagRole, BranchType
@@ -9,13 +12,7 @@ from binaryninja.function import RegisterInfo, InstructionInfo, InstructionTextT
 from binaryninja.log import log_info
 from binaryninja.lowlevelil import LowLevelILFunction
 
-def u8(bs, signed=False):
-    x, = struct.unpack('<' + 'b' if signed else 'B', bs)
-    return x
-
-def u16(bs, signed=False):
-    x, = struct.unpack("<" + 'h' if signed else 'H', bs)
-    return x
+ATOM_REGEX = re.compile('([()\+\-])')
 
 class LR35902(Architecture):
     name = 'LR35902'
@@ -45,17 +42,17 @@ class LR35902(Architecture):
         'L': RegisterInfo('HL', 1, 0),
     }
 
-    flags = ["z", "n", "h", "c"]
-    flag_write_types = ["*", "czn", "zn"]
+    flags = ["z", "n", "c", "h"]
+    flag_write_types = ["*", "znc", "zn"]
     flag_roles = {
         'z': FlagRole.ZeroFlagRole,
         'n': FlagRole.NegativeSignFlagRole,
-        'h': FlagRole.HalfCarryFlagRole,
         'c': FlagRole.CarryFlagRole,
+        'h': FlagRole.HalfCarryFlagRole,
     }
     flags_written_by_flag_write_type = {
-        "*": ["c", "z", "h", "n"],
-        "czn": ["c", "z", "n"],
+        "*": ["z", "n", "c", "h"],
+        "znc": ['z', 'n', 'c'],
         "zn": ["z", "n"],
     }
 
@@ -149,6 +146,10 @@ class LR35902(Architecture):
         with open(os.path.join(basepath, 'opcodes.json')) as fin:
             self.opcodes = json.load(fin)
 
+    def flag_write_type(self, flags: List[str]) -> str:
+        flags = [name for name, effect in zip(self.flags, flags) if effect != '-']
+
+        return ''.join(flags)
 
     def _get_io_register(self, addr):
         if addr in range(0xFF80, 0xFFFF):
@@ -170,13 +171,10 @@ class LR35902(Architecture):
             return self.INVALID_INS
 
         ins_operands_symbolic = []
-        ins_operands = []
         if 'operand1' in ins_entry:
             ins_operands_symbolic.append(ins_entry['operand1'])
-            ins_operands.append(self._fetch_operand(data, addr, ins_entry['operand1'], ins_entry))
         if 'operand2' in ins_entry:
             ins_operands_symbolic.append(ins_entry['operand2'])
-            ins_operands.append(self._fetch_operand(data, addr, ins_entry['operand2'], ins_entry))
 
         ins_flags = [f.lower() for f in ins_entry['flags']]
         if ins_entry['length'] == 2:
@@ -186,49 +184,7 @@ class LR35902(Architecture):
         else:
             ins_value = None
 
-        return ins_entry['mnemonic'], ins_entry['length'], ins_operands, ins_flags, ins_value
-
-    def _fetch_operand(self, data: bytes, addr: int, operand: str, ins_entry):
-        insn_length = ins_entry['length']
-        mnemonic = ins_entry['mnemonic']
-        if operand[0] == '(':
-            assert operand[-1] == ')'
-            op_addr = operand[1:-1]
-            addr_update = None
-            if op_addr[-1] in '+-':
-                addr_update = op_addr[-1]
-                op_addr = op_addr[:-1]
-
-            return 'mem', addr_update, self._fetch_operand(data, addr, operand[1:-1])
-
-        elif operand == 'd8':
-            return 'imm8', u8(data[1:2], signed=True)
-
-        elif operand == 'd16':
-            return 'imm16', u16(data[1:3], signed=True)
-
-        elif operand == 'a8':
-            return 'addr', 0xff00 + u8(data[1:2])
-
-        elif operand == 'r8':
-            return 'addr', (addr + ins_entry['length'] + u8(data[1:2], signed=True)) & 0xffff
-
-        elif operand == 'a16':
-            return 'addr', u16(data[1:3], signed=False)
-
-        elif operand in 'ABCDEFHL':
-            return 'reg8', operand
-        elif operand in {'AF', 'BC', 'DE', 'HL', 'SP', 'PC'}:
-            return 'reg16', operand
-
-        elif operand == 'SP+d8':
-            return 'sp_offset', u8(data[1:2], signed=True)
-
-        elif operand in {'C', 'Z', 'NC', 'NZ'}:
-            return 'condition', operand
-
-        else:
-            assert False, f"Unknown operand pattern: {data=}, {addr=}, {insn_length=}, {mnemonic=}: {operand=}"
+        return ins_entry['mnemonic'], ins_entry['length'], ins_operands_symbolic, ins_flags, ins_value
 
     def _get_token_for_operand(self, mnemonic: str, operand: str, data: bytes, addr: int, instruction_length: int):
         if mnemonic == 'STOP':
@@ -239,7 +195,7 @@ class LR35902(Architecture):
 
         result = []
         depth = 0
-        atoms = [t for t in re.split(r'([()\+\-])', operand) if t]
+        atoms = [t for t in ATOM_REGEX.split(operand) if t]
 
         for atom in atoms:
             if atom == 'd8':
@@ -250,6 +206,11 @@ class LR35902(Architecture):
                 value = struct.unpack('<H', data[1:3])[0]
                 result.append(InstructionTextToken(
                     InstructionTextTokenType.PossibleAddressToken, f'{value:#06x}', value))
+            elif atom == 'offset8':
+                value = struct.unpack("<b", data[1:2])[0]
+                result.append(InstructionTextToken(
+                    InstructionTextTokenType.PossibleValueToken, f'{value:#02x}', value
+                ))
             elif atom == 'a8':
                 value = struct.unpack('<B', data[1:2])[0]
                 try:
@@ -299,7 +260,7 @@ class LR35902(Architecture):
         return result
 
     def get_instruction_info(self, data: bytes, addr: int):
-        ins_mnem, ins_len, _, _, _ = self._decode_instruction(data, addr)
+        ins_mnem, ins_len, operand_symbols, _, _  = self._decode_instruction(data, addr)
         if not ins_mnem:
             return None
 
@@ -332,7 +293,7 @@ class LR35902(Architecture):
                     result.add_branch(BranchType.FalseBranch, arg)
                 else:
                     result.add_branch(BranchType.UnconditionalBranch, arg)
-        elif ins_mnem == 'RET':
+        elif ins_mnem == 'RET' and not operand_symbols:
             result.add_branch(BranchType.FunctionReturn)
         elif ins_mnem == 'RETI':
             result.add_branch(BranchType.FunctionReturn)
@@ -363,4 +324,8 @@ class LR35902(Architecture):
         return tokens, ins_len
 
     def get_instruction_low_level_il(self, data, addr, il: LowLevelILFunction):
-        return None
+        mnem, len, operands, ins_flags, _ = self._decode_instruction(data, addr)
+
+        insn = GameBoyInstruction(addr, data, mnem, len, operands, self.flag_write_type(ins_flags))
+        lifter = GameBoyLifter(il)
+        return lifter.lift(insn)

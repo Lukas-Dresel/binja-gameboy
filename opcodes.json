@@ -3490,7 +3490,7 @@
         "-"
       ],
       "addr": "0xe2",
-      "operand1": "(C)",
+      "operand1": "(C_IO)",
       "operand2": "A"
     },
     "0xe5": {
@@ -3552,7 +3552,7 @@
       ],
       "addr": "0xe8",
       "operand1": "SP",
-      "operand2": "d8"
+      "operand2": "offset8"
     },
     "0xe9": {
       "mnemonic": "JP",
@@ -3567,7 +3567,7 @@
         "-"
       ],
       "addr": "0xe9",
-      "operand1": "(HL)"
+      "operand1": "HL"
     },
     "0xea": {
       "mnemonic": "LD",
@@ -3660,7 +3660,7 @@
       ],
       "addr": "0xf2",
       "operand1": "A",
-      "operand2": "(C)"
+      "operand2": "(C_IO)"
     },
     "0xf3": {
       "mnemonic": "DI",
@@ -3735,7 +3735,7 @@
       ],
       "addr": "0xf8",
       "operand1": "HL",
-      "operand2": "SP+r8"
+      "operand2": "SP+d8"
     },
     "0xf9": {
       "mnemonic": "LD",
